@@ -59,7 +59,8 @@ webrtc-javaweb-server/
        ├─ index.html
        ├─ publish.html
        └─ play.html|
-       
+```
+    
 # 4常见问题
 ## 4.1 publish.html 无法打开
 在本地跑时，防火墙打开使得拉流端拉流失败，因此可以暂时关闭防火墙
