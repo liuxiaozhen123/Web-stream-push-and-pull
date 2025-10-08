@@ -1,6 +1,8 @@
 # 1环境安装
 环境：本机 windows系统 的 linux 子系统 WSL
+
 Ubuntu版本: 20.04
+
 安装docker
 
 # 2运行代码
