@@ -1,0 +1,304 @@
+<!-- <!doctype html>
+<meta charset="utf-8">
+<title>Publisher</title>
+<style>video{width:48%;background:#000;margin:4px}</style>
+<h3>发布端（推流到服务器）</h3>
+<button id="start">开始发布</button>
+<button id="stop" disabled>停止</button>
+<div>
+  <video id="local" autoplay playsinline muted></video>
+  <video id="remote" autoplay playsinline></video>
+</div>
+<script>
+let ws;
+let pc, localStream;
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 5;   // 最大重连次数
+const RECONNECT_INTERVAL = 2000; // 每次重连间隔 2s
+
+// 建立 WebSocket 连接
+function initWebSocket() {
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    console.log("WebSocket connected.");
+    reconnectAttempts = 0; // 重置重连计数
+  };
+
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.id === 'publishResponse') {
+      await pc.setRemoteDescription(new RTCSessionDescription({type:'answer', sdp: msg.sdpAnswer}));
+    } else if (msg.id === 'iceCandidate') {
+      try { await pc.addIceCandidate(msg.candidate); } catch (err) { console.warn(err); }
+    } else if (msg.id === 'error') {
+      alert('Server error: ' + msg.message);
+    }
+  };
+
+  ws.onclose = () => {
+    console.warn("WebSocket closed.");
+    attemptReconnect();
+  };
+
+  ws.onerror = (err) => {
+    console.error("WebSocket error:", err);
+    ws.close();
+  };
+}
+
+// 自动重连逻辑
+function attemptReconnect() {
+  if (reconnectAttempts < MAX_RECONNECT) {
+    reconnectAttempts++;
+    console.log(`Reconnecting attempt ${reconnectAttempts}...`);
+    setTimeout(initWebSocket, RECONNECT_INTERVAL);
+  } else {
+    console.error("Max reconnect attempts reached. Please refresh the page.");
+  }
+}
+
+// 安全发送消息
+function safeSend(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  } else {
+    console.warn("WebSocket not open, message dropped:", msg);
+  }
+}
+
+// 开始推流
+async function start() {
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+
+  pc = new RTCPeerConnection({
+    iceServers:[{urls:'stun:stun.l.google.com:19302'}]
+  });
+
+  pc.onicecandidate = ev => {
+    if (ev.candidate) safeSend({id:'onIceCandidate', candidate: ev.candidate});
+  };
+
+  pc.ontrack = ev => { document.getElementById('remote').srcObject = ev.streams[0]; };
+
+  localStream = await navigator.mediaDevices.getUserMedia({video:true, audio:true});
+  document.getElementById('local').srcObject = localStream;
+  for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+
+  const offer = await pc.createOffer({offerToReceiveAudio:true, offerToReceiveVideo:true});
+  await pc.setLocalDescription(offer);
+
+  safeSend({id:'publish', sdpOffer: offer.sdp});
+}
+
+// 停止推流
+function stop() {
+  safeSend({id:'stop'});
+  if (pc) {
+    pc.close();
+    pc = null;
+  }
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick  = stop;
+
+// 页面加载时初始化 WebSocket
+initWebSocket();
+</script> -->
+
+
+<!doctype html>
+<meta charset="utf-8">
+<title>Publisher</title>
+<style>video{width:48%;background:#000;margin:4px}</style>
+<h3>发布端（推流到服务器）</h3>
+<button id="start">开始发布</button>
+<button id="stop" disabled>停止</button>
+<div>
+  <video id="local" autoplay playsinline muted></video>
+  <video id="remote" autoplay playsinline></video>
+</div>
+<script>
+// WebSocker 建立连接 ：根据 网页打开协议选择 相应 websocket 协议
+const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+const ws = new WebSocket(`${wsProto}://${location.host}/ws`);  // 支持双向通信实现
+
+let pc, localStream, heartbeat; // pc： RTCPeerConnection对象，表示浏览器和远端（Kurento）服务器之间的WebRTC连接 localStream:本地媒体流（摄像头和麦克风）
+let statsTimerPub, lastBytesPub = 0, lastTimestampPub = Date.now();
+
+
+// 心跳：定期发送 ping 保持连接
+ws.onopen = () => {
+  heartbeat = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({id: "ping"}));
+      console.log(`[Heartbeat] ping sent at ${new Date().toLocaleTimeString()}`);
+    }
+  }, 30000);
+};
+
+// WebSocket 关闭时清理心跳
+ws.onclose = () => {
+  clearInterval(heartbeat);
+};
+
+// 处理服务器返回的消息
+ws.onmessage = async (e) => {
+  const msg = JSON.parse(e.data);
+  if (msg.id === 'publishResponse') {
+    await pc.setRemoteDescription(new RTCSessionDescription({type:'answer', sdp: msg.sdpAnswer}));
+  } else if (msg.id === 'iceCandidate') {
+    try { await pc.addIceCandidate(msg.candidate); } catch (err) { console.warn(err); }
+  } else if (msg.id === 'error') {
+    alert('Server error: ' + msg.message);
+  } else if (msg.id === 'pong') {
+    console.log(`[Heartbeat] pong received at ${new Date().toLocaleTimeString()}`);
+  }
+};
+
+// ---------- stats 监控逻辑（推流端） ----------
+function startStatsMonitorPublisher() {
+  if (statsTimerPub) clearInterval(statsTimerPub);
+  lastBytesPub = 0; // 上一次统计时的已发送字节数
+  lastTimestampPub = Date.now();  // 上一次统计时的时间戳
+
+  statsTimerPub = setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();  // 获取WebRTC 运行时统计信息
+    stats.forEach(report => {
+      if (report.type === "outbound-rtp" && report.kind === "video") {
+        const now = Date.now();
+        if (lastBytesPub > 0) {
+          const bitrate = ((report.bytesSent - lastBytesPub) * 8) / ((now - lastTimestampPub) / 1000);   // report.bytesSent - lastBytesPub :最近一段时间内新发送的字节数
+          console.log(`[${new Date().toLocaleTimeString()}] 🚀 推流端码率: ${(bitrate/1000).toFixed(2)} kbps`);
+        }
+        lastBytesPub = report.bytesSent;  // 累计发送的字节数
+        lastTimestampPub = now;
+      }
+    });
+  }, 5000);
+}
+
+function stopStatsMonitorPublisher() {
+  if (statsTimerPub) clearInterval(statsTimerPub);
+  statsTimerPub = null;
+}
+
+
+//开始推流
+async function start() 
+{
+  // 禁用开始，启用停止
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+  
+  // 创建一个 RTCPeerConnection ，配置STUN服务器，帮助穿透NAT
+  pc = new RTCPeerConnection({
+    iceServers:[{urls:'stun:stun.l.google.com:19302'}]
+  });
+
+
+  // 假设你已经创建了 RTCPeerConnection 对象 pc
+  pc.addEventListener('iceconnectionstatechange', () => {
+    const state = pc.iceConnectionState;
+    const now = new Date().toLocaleTimeString();
+
+    console.log(`[${now}] ICE connection state changed: ${state}`);
+
+    // 如果连接断开，额外提示一下
+    if (state === 'disconnected' || state === 'failed') {
+      console.warn(`[${now}] ⚠️ ICE 连接断开！可能无法继续拉流/推流`);
+    }
+  });
+
+  pc.addEventListener('connectionstatechange', () => {
+    console.log(`[PC] connection state: ${pc.connectionState}`);
+  });
+
+
+  // 把本地收集到的候选地址（ICE Candidate）发给服务器，由服务器转发给对端
+  pc.onicecandidate = ev => {
+    if (ev.candidate) ws.send(JSON.stringify({id:'onIceCandidate', candidate: ev.candidate}));
+  };
+
+  // 如果服务器有流返回，显示在远端video标签
+  pc.ontrack = ev => { document.getElementById('remote').srcObject = ev.streams[0]; };
+
+  // 获取本地摄像头+麦克风，显示在local video , 并添加到连接中
+  localStream = await navigator.mediaDevices.getUserMedia({
+    video:{ // 指定分辨率和帧率
+      width: { min: 1920, ideal: 1920, max: 1920 },   // 理想宽度
+    height: { min: 1080, ideal: 1080, max: 1080 },   // 理想高度
+    frameRate: { ideal: 15 }, // 理想帧率
+    },
+    // true, 
+    audio:true}); 
+  document.getElementById('local').srcObject = localStream;
+  
+  for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+
+  // 🚀 在 addTrack 之后，设置 码率参数
+  pc.getSenders().forEach(sender => {
+    if (sender.track && sender.track.kind === "video") {
+      let params = sender.getParameters();
+      if (!params.encodings) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps (单位：bps)
+      params.encodings[0].minBitrate = 1_000_000;   // ，避免太糊
+      sender.setParameters(params).then(() => {
+        console.log("[WebRTC] 视频参数已设置:");
+        console.log(" - 分辨率: 1920x1080 @30fps");
+        console.log(" - 码率范围: 1Mbps ~ 4Mbps");
+      }).catch(err => console.error("setParameters error", err));
+    }
+  });
+  // // 🟢 使用 Simulcast：多层视频流（低/中/高）
+  // const videoTrack = localStream.getVideoTracks()[0];
+  // pc.addTransceiver(videoTrack, {
+  //   direction: "sendonly",
+  //   sendEncodings: [
+  //     { rid: "q", scaleResolutionDownBy: 4, maxBitrate: 500_000 },   // 低清层 480p
+  //     { rid: "h", scaleResolutionDownBy: 2, maxBitrate: 1_500_000 }, // 高清层 720p
+  //     { rid: "f", scaleResolutionDownBy: 1, maxBitrate: 4_000_000 }  // 全高清层 1080p
+  //   ]
+  // });
+
+  // // 添加音频轨道
+  // const audioTrack = localStream.getAudioTracks()[0];
+  // if (audioTrack) pc.addTrack(audioTrack, localStream);
+  
+  // 创建offer, 设置为本地描述，然后发给服务器，请求推流
+  const offer = await pc.createOffer({offerToReceiveAudio:true, offerToReceiveVideo:true});  // 让浏览器生成一个 SDP offer (包含本地媒体能力。比如支持的音视频编解码器，分辨率、比特率)
+  await pc.setLocalDescription(offer);
+
+  ws.send(JSON.stringify({id:'publish', sdpOffer: offer.sdp})); // 通过websocket 将SDP offer 发送给服务器Kurento,请求其作为对端生成SDp answer
+
+  startStatsMonitorPublisher();
+}
+
+function stop() {
+  ws.send(JSON.stringify({id:'stop'}));
+  if (pc) pc.close();
+  pc = null;
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  stopStatsMonitorPublisher();
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick  = stop;
+</script>

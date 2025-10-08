@@ -1,0 +1,186 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Player</title>
+<style>video{width:60%;background:#000}</style>
+<h3>观看端（从服务器拉流）</h3>
+<button id="play">开始播放</button>
+<button id="stop" disabled>停止</button>
+<div><video id="remote" autoplay playsinline controls></video></div>
+<script>
+  // 建立 WebSocket 连接
+const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+
+let pc, heartbeat;
+let statsTimerSub, lastBytesSub = 0, lastTimestampSub = Date.now();
+
+// 心跳：定期发送 ping 保持连接
+ws.onopen = () => {
+  heartbeat = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({id: "ping"}));
+      console.log(`[Heartbeat] ping sent at ${new Date().toLocaleTimeString()}`);
+    }
+  }, 30000);
+};
+
+// WebSocket 关闭时清理心跳
+ws.onclose = () => {
+  clearInterval(heartbeat);
+};
+
+// 接收服务器消息
+ws.onmessage = async (e) => { // 当WebSocket 从服务器收到消息时会触发 ws.onmessage
+  const msg = JSON.parse(e.data);
+  if (msg.id === 'playResponse') { // 服务器返回SDP answer ,设置为远端描述，完成协商
+    await pc.setRemoteDescription(new RTCSessionDescription({type:'answer', sdp: msg.sdpAnswer}));
+  } else if (msg.id === 'iceCandidate') { // 服务器转发的对端候选地址，加入到本地连接
+    try { await pc.addIceCandidate(msg.candidate); } catch (err) { console.warn(err); }
+  } else if (msg.id === 'error') {
+    alert('Server error: ' + msg.message);
+  } else if (msg.id === 'pong') {  // 对前端定期发的 "ping" 的回应
+    console.log(`[Heartbeat] pong received at ${new Date().toLocaleTimeString()}`);
+  }
+};
+
+
+// ---------- stats 监控逻辑（拉流端） ----------
+function startStatsMonitorPlayer() {
+  if (statsTimerSub) clearInterval(statsTimerSub);
+  lastBytesSub = 0;
+  lastTimestampSub = Date.now();
+
+  statsTimerSub = setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    stats.forEach(report => {
+      if (report.type === "inbound-rtp" && report.kind === "video") {
+        const now = Date.now();
+        if (lastBytesSub > 0) {
+          const bitrate = ((report.bytesReceived - lastBytesSub) * 8) / ((now - lastTimestampSub) / 1000);
+          console.log(`[${new Date().toLocaleTimeString()}] 🎬 拉流端码率: ${(bitrate/1000).toFixed(2)} kbps`);
+        }
+        lastBytesSub = report.bytesReceived;
+        lastTimestampSub = now;
+
+        // 打印分辨率
+        const track = document.getElementById('remote').srcObject?.getVideoTracks()[0];
+        if (track) {
+          const settings = track.getSettings();
+          console.log(`[${new Date().toLocaleTimeString()}] 📺 分辨率: ${settings.width}x${settings.height}, fps≈${settings.frameRate || "?"}`);
+        }
+      }
+    });
+  }, 5000);
+}
+
+function stopStatsMonitorPlayer() {
+  if (statsTimerSub) clearInterval(statsTimerSub);
+  statsTimerSub = null;
+}
+
+// 播放视频逻辑
+async function play() {
+  // 禁用 启动按钮，避免重复点击
+  document.getElementById('play').disabled = true;
+  document.getElementById('stop').disabled = false;
+
+  // 创建 RTCPeerConnection ,,指定STUN服务器，帮助NAT穿透
+  pc = new RTCPeerConnection({
+    iceServers:[{urls:'stun:stun.l.google.com:19302'}]
+  });
+
+  // 假设你已经创建了 RTCPeerConnection 对象 pc
+  pc.addEventListener('iceconnectionstatechange', () => {
+    const state = pc.iceConnectionState;
+    const now = new Date().toLocaleTimeString();
+
+    console.log(`[${now}] ICE connection state changed: ${state}`);
+
+    // 如果连接断开，额外提示一下
+    if (state === 'disconnected' || state === 'failed') {
+      console.warn(`[${now}] ⚠️ ICE 连接断开！可能无法继续拉流/推流`);
+    }
+  });
+
+  // ? 将收集到本地的候选地址，通过WebSocket发给服务器
+  pc.onicecandidate = ev => {
+    if (ev.candidate) ws.send(JSON.stringify({id:'onIceCandidate', candidate: ev.candidate}));
+  };
+  // 一旦收到远流端，将其绑定到<video id="remoto">播放
+  pc.ontrack = ev => { 
+    document.getElementById('remote').srcObject = ev.streams[0]; 
+    // 启动 stats 监控（每 30 秒打印一次）
+    startStatsMonitorPlayer();
+  };
+
+  
+
+  // 仅接收：添加 recvonly 转接收媒体
+  pc.addTransceiver('video', {direction:'recvonly'});
+  pc.addTransceiver('audio', {direction:'recvonly'});
+
+  // 生成 SDP offer 并保存为本地描述
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // 把play请求和SDP offer 发送给服务器，等待服务器返回answer
+  ws.send(JSON.stringify({id:'play', sdpOffer: offer.sdp}));
+}
+
+// 停止播放
+function stop() {
+  ws.send(JSON.stringify({id:'stop'}));
+  if (pc) pc.close();
+  pc = null;
+  document.getElementById('play').disabled = false;
+  document.getElementById('stop').disabled = true;
+  stopStatsMonitorPlayer();// 停止stats监测
+}
+
+// // ---------- stats 监控逻辑 ----------
+// let statsTimer;
+// let lastBytes = 0;
+// let lastTimestamp = Date.now();
+
+// function startStatsMonitor() {
+//   if (statsTimer) clearInterval(statsTimer);
+
+//   statsTimer = setInterval(async () => {
+//     if (!pc) return;
+//     const stats = await pc.getStats();
+//     stats.forEach(report => {
+//       // 只关心 inbound-rtp（接收端）
+//       if (report.type === "inbound-rtp" && report.kind === "video") {
+//         const now = Date.now();
+//         const nowTime = new Date().toLocaleTimeString();
+
+//         // 计算瞬时码率（bps → kbps）
+//         if (lastBytes > 0) {
+//           const bitrate = ((report.bytesReceived - lastBytes) * 8) / ((now - lastTimestamp) / 1000);
+//           console.log(`[${nowTime}] ▶ 瞬时视频带宽: ${(bitrate/1000).toFixed(2)} kbps`);
+//         }
+
+//         lastBytes = report.bytesReceived;
+//         lastTimestamp = now;
+
+//         // 获取分辨率
+//         const track = document.getElementById('remote').srcObject?.getVideoTracks()[0];
+//         if (track) {
+//           const settings = track.getSettings();
+//           console.log(`[${nowTime}] 📺 分辨率: ${settings.width}x${settings.height}, fps≈${settings.frameRate || "?"}`);
+//         }
+//       }
+//     });
+//   }, 30000); // 每 30 秒打印一次
+// }
+
+// function stopStatsMonitor() {
+//   if (statsTimer) clearInterval(statsTimer);
+//   statsTimer = null;
+// }
+
+// 绑定按钮 play()与开始播放 stop()与停止绑定
+document.getElementById('play').onclick = play;
+document.getElementById('stop').onclick = stop;
+</script>
