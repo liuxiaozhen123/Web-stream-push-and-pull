@@ -9,44 +9,49 @@ Ubuntu版本: 20.04
 ## 2.1 启动 Kurento Media Server(KMS)
 安装docker 后可尝试：
 
+```text
 docker run --rm -p 8888:8888 kurento/kurento-media-server:latest
-
+```
 一直出现错误：
-
+```text
 Unable to find image 'kurento/kurento-media-server:latest' locally docker: Error response from daemon: Get "https://registry-1.docker.io/v2/": net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers). See 'docker run --help'.
-
+```
 原因：网络问题
 
 尝试将镜像保存在本地：
 
+```text
 docker pull docker.1ms.run/kurento/kurento-media-server:7.0.0
 
 docker run --rm -p 8888:8888 docker.1ms.run/kurento/kurento-media-server:7.0.0
-
+```
 如果端口号已经被占用，执行下面的命令：
-
+```text
 sudo lsof -i :8888
 
 docker ps   # 找到容器 ID
 
 docker stop <容器ID>
+```
 
 ## 2.2启动Java Web(信令+静态页)
-
+```text
 mvn clean package
 
 java -Dkms.url=ws://localhost:8888/kurento -jar target/webrtc-javaweb.jar
-
+```
 Java 后端报错： Caused by: java.net.BindException: Address already in use
 
-Linux: sudo lsof -i :8080 kill -9 PID
-
+Linux: 
+```text
+sudo lsof -i :8080 kill -9 PID
+```
 控制台应打印：
-
+```text
 HTTP : http://localhost:8080
 
 WS   : ws://localhost:8080/ws
-
+```
 # 3项目结构
 ```text
 webrtc-javaweb-server/
@@ -68,7 +73,7 @@ webrtc-javaweb-server/
 
 # 5当前代码工作原理
 Publisher 与 Viewer以KMS为中转先互相传输SDP,ICE构建通路，通路构建好后，推流端发送媒体流到流媒体服务器KMS,流媒体服务器再传输给拉流端
-
+```text
 Publisher (推流端)        KMS (Kurento,流媒体服务器)               Viewer (拉流端)
       |                               |                           |
       | ---- SDP Offer ------> |                           |  (Publisher 发 Offer 给 KMS)
@@ -89,5 +94,5 @@ Publisher (推流端)        KMS (Kurento,流媒体服务器)               View
       |                                |                           |
       |                                | ====== 媒体流下行 ======> |  (发布端视频流转发给观众)
       |                                |                           |
-
+```
 
