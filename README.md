@@ -48,6 +48,7 @@ HTTP : http://localhost:8080
 WS   : ws://localhost:8080/ws
 
 # 3项目结构
+```text
 webrtc-javaweb-server/
 ├─ pom.xml
 └─ src/main/
